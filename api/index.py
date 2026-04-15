@@ -9,21 +9,35 @@ from sqlalchemy.orm import sessionmaker, Session, relationship
 from fastapi.middleware.cors import CORSMiddleware
 import joblib
 
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # --- DATABASE SETUP ---
-# Use Vercel Postgres URL or fallback to local for testing
 DATABASE_URL = os.getenv("POSTGRES_URL", os.getenv("DATABASE_URL"))
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+if DATABASE_URL:
+    if DATABASE_URL.startswith("postgres://"):
+        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    # Add connection pooling parameters for serverless
+    if "?" not in DATABASE_URL:
+        DATABASE_URL += "?sslmode=require"
+    elif "sslmode" not in DATABASE_URL:
+        DATABASE_URL += "&sslmode=require"
 
-if not DATABASE_URL:
-    current_user = os.getenv("USER")
-    DATABASE_URL = f"postgresql://{current_user}@localhost/dinesync"
+logger.info(f"Connecting to database: {DATABASE_URL.split('@')[-1] if DATABASE_URL else 'None'}")
 
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+try:
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    Base = declarative_base()
+except Exception as e:
+    logger.error(f"Failed to create engine: {e}")
+    raise e
 
 # --- MODELS ---
+# ... (rest of models remain the same) ...
 
 class CustomerDB(Base):
     __tablename__ = "customers"
@@ -172,20 +186,29 @@ def calculate_smart_wait(db: Session, party_size: int):
 # --- INITIALIZATION ---
 @app.on_event("startup")
 def startup_event():
-    # Only create tables if they don't exist, don't drop!
-    Base.metadata.create_all(bind=engine)
-    
-    db = SessionLocal()
-    # Basic seed if empty
-    if db.query(TableDB).count() == 0:
-        print("🌱 Initial Table Seeding...")
-        tables = []
-        for i in range(1, 21):
-            cap = 2 if i <= 8 else 4 if i <= 16 else 6
-            tables.append(TableDB(table_number=i, capacity=cap, status="Available"))
-        db.add_all(tables)
-        db.commit()
-    db.close()
+    logger.info("Application starting up...")
+    try:
+        # Only create tables if they don't exist, don't drop!
+        Base.metadata.create_all(bind=engine)
+        logger.info("Tables checked/created successfully.")
+        
+        db = SessionLocal()
+        # Basic seed if empty
+        if db.query(TableDB).count() == 0:
+            logger.info("🌱 Initial Table Seeding...")
+            tables = []
+            for i in range(1, 21):
+                cap = 2 if i <= 8 else 4 if i <= 16 else 6
+                tables.append(TableDB(table_number=i, capacity=cap, status="Available"))
+            db.add_all(tables)
+            db.commit()
+            logger.info("Seeding completed.")
+        db.close()
+    except Exception as e:
+        logger.error(f"❌ Critical Error during startup: {e}")
+        # In serverless, we might not want to raise if we want the app to at least serve 
+        # a basic status, but for debugging, we need to know it failed.
+        raise e
 
 # --- ENDPOINTS ---
 
